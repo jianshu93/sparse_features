@@ -10,4 +10,5 @@ sparse_features ./data/GWMC_OTU_name.txt 50000
 git clone https://github.com/jianshu93/sparse_features
 cd sparse_features
 cargo build --release
+./target/release/sparse_features -h
 ```
