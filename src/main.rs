@@ -9,10 +9,7 @@ use std::{
 };
 
 fn main() -> io::Result<()> {
-    // ------------------------------------------------------------------------
-    // 1) Parse Command-Line Arguments
-    // ------------------------------------------------------------------------
-    // We expect exactly 2 arguments (after the program name):
+    // We expect exactly 2 arguments:
     //   1) Path to the file with feature names (one per line)
     //   2) Number of samples to generate (columns)
     let args: Vec<String> = env::args().collect();
@@ -30,9 +27,8 @@ fn main() -> io::Result<()> {
         }
     };
 
-    // ------------------------------------------------------------------------
-    // 2) Read the list of features from file
-    // ------------------------------------------------------------------------
+
+    // Read the list of features from file
     let features = read_features(features_file_path)?;
     if features.is_empty() {
         eprintln!("No features found in '{}'.", features_file_path);
@@ -44,9 +40,8 @@ fn main() -> io::Result<()> {
         num_features, features_file_path, num_samples
     );
 
-    // ------------------------------------------------------------------------
-    // 3) Prepare Output (Tab-Separated)
-    // ------------------------------------------------------------------------
+    // Prepare Output (Tab-Separated)
+
     // We'll create an output file named "sparse_dataset.tsv".
     // Each row:  FeatureName [TAB] val1 [TAB] val2 [TAB] ... [TAB] valN
     let output_path = "sparse_dataset.tsv";
@@ -57,9 +52,8 @@ fn main() -> io::Result<()> {
     //   "Feature    sample1    sample2    ...    sampleN"
     write_header(&mut writer, num_samples)?;
 
-    // ------------------------------------------------------------------------
-    // 4) Row Generation Strategy
-    // ------------------------------------------------------------------------
+
+    // Row Generation Strategy
     // - We define a sparsity fraction: fraction of columns (samples) that get a
     //   non-zero integer value per feature/row.
     // - We pick ~ (sparsity * num_samples) distinct columns to fill for that row.
@@ -82,9 +76,7 @@ fn main() -> io::Result<()> {
         // Slice of features for this chunk
         let feature_chunk = &features[start_idx..end_idx];
 
-        // --------------------------------------------------------------------
         // Process each feature in parallel using Rayon
-        // --------------------------------------------------------------------
         let rows_data: Vec<String> = feature_chunk
             .par_iter()
             .map(|feature_name| {
@@ -98,10 +90,7 @@ fn main() -> io::Result<()> {
                 format_one_row(feature_name, &row)
             })
             .collect();
-
-        // --------------------------------------------------------------------
         // Write the rows in the correct (original) order
-        // --------------------------------------------------------------------
         for row_str in rows_data {
             writer.write_all(row_str.as_bytes())?;
         }
@@ -134,7 +123,7 @@ fn read_features(file_path: &str) -> io::Result<Vec<String>> {
 }
 
 /// Write the header line to the TSV file:
-///    Feature [TAB] sample1 [TAB] sample2 [TAB] ... [TAB] sampleN
+/// Feature [TAB] sample1 [TAB] sample2 [TAB] ... [TAB] sampleN
 fn write_header<W: Write>(writer: &mut W, num_samples: usize) -> io::Result<()> {
     write!(writer, "Feature")?;
     for i in 1..=num_samples {
@@ -209,9 +198,9 @@ fn fix_row_values(row: &mut [f32]) {
 }
 
 /// Format a single row as:
-///   FeatureName [TAB] val1 [TAB] val2 [TAB] ... [TAB] valN [NEWLINE]
+/// FeatureName [TAB] val1 [TAB] val2 [TAB] ... [TAB] valN [NEWLINE]
 /// Example:
-///   "GeneABC\t12.0\t0.0\t5.0\t...\n"
+/// "GeneABC\t12.0\t0.0\t5.0\t...\n"
 fn format_one_row(feature_name: &str, row_values: &[f32]) -> String {
     let mut line = String::new();
     line.push_str(feature_name);
