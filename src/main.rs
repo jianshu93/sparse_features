@@ -6,8 +6,8 @@
 // - BIOM 2.1 writer compatible with `biom 2.1.16` CLI
 
 use clap::{Arg, Command};
-use hdf5::{types::VarLenUnicode, File as H5File, Result as H5Result};
-use newick::{one_from_string, Newick, NewickTree};
+use hdf5::{File as H5File, Result as H5Result, types::VarLenUnicode};
+use newick::{Newick, NewickTree, one_from_string};
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
 use rand_distr::{Distribution, Normal, Poisson, Uniform};
@@ -85,7 +85,10 @@ fn load_newick_taxa(tree_path: &str) -> anyhow::Result<Vec<String>> {
     let mut taxa = Vec::<String>::new();
     for n in t.nodes() {
         if t[n].is_leaf() {
-            let nm = t.name(n).map(ToOwned::to_owned).unwrap_or_else(|| format!("L{n}"));
+            let nm = t
+                .name(n)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("L{n}"));
             taxa.push(nm);
         }
     }
@@ -123,8 +126,10 @@ impl AliasSampler {
         if n == 0 || sum <= 0.0 {
             return Self { prob, alias };
         }
-        let mut scaled: Vec<f64> =
-            weights.iter().map(|&w| (w.max(0.0)) * (n as f64) / sum).collect();
+        let mut scaled: Vec<f64> = weights
+            .iter()
+            .map(|&w| (w.max(0.0)) * (n as f64) / sum)
+            .collect();
         let mut small = Vec::<usize>::new();
         let mut large = Vec::<usize>::new();
         for (i, &p) in scaled.iter().enumerate() {
@@ -160,11 +165,7 @@ impl AliasSampler {
         }
         let i = rng.gen_range(0..n);
         let u: f64 = uni.sample(rng);
-        if u < self.prob[i] {
-            i
-        } else {
-            self.alias[i]
-        }
+        if u < self.prob[i] { i } else { self.alias[i] }
     }
 }
 
@@ -276,17 +277,37 @@ fn write_biom_hdf5(
     obs.new_dataset_builder().with_data(&taxa_v).create("ids")?;
 
     let samp_v = as_vlen(sample_ids);
-    samp.new_dataset_builder().with_data(&samp_v).create("ids")?;
+    samp.new_dataset_builder()
+        .with_data(&samp_v)
+        .create("ids")?;
 
     // ---------- observation/matrix (CSR) ----------
-    obs_mat.new_dataset_builder().with_data(data).create("data")?;
-    obs_mat.new_dataset_builder().with_data(&obs_indices).create("indices")?;
-    obs_mat.new_dataset_builder().with_data(&obs_indptr).create("indptr")?;
+    obs_mat
+        .new_dataset_builder()
+        .with_data(data)
+        .create("data")?;
+    obs_mat
+        .new_dataset_builder()
+        .with_data(&obs_indices)
+        .create("indices")?;
+    obs_mat
+        .new_dataset_builder()
+        .with_data(&obs_indptr)
+        .create("indptr")?;
 
     // ---------- sample/matrix (CSC) ----------
-    samp_mat.new_dataset_builder().with_data(&samp_data).create("data")?;
-    samp_mat.new_dataset_builder().with_data(&samp_indices).create("indices")?;
-    samp_mat.new_dataset_builder().with_data(&samp_indptr).create("indptr")?;
+    samp_mat
+        .new_dataset_builder()
+        .with_data(&samp_data)
+        .create("data")?;
+    samp_mat
+        .new_dataset_builder()
+        .with_data(&samp_indices)
+        .create("indices")?;
+    samp_mat
+        .new_dataset_builder()
+        .with_data(&samp_indptr)
+        .create("indptr")?;
 
     // ---------- top-level required attributes ----------
     // Strings as vlen unicode attrs
@@ -297,18 +318,26 @@ fn write_biom_hdf5(
     f.new_attr_builder().with_data(&type_attr).create("type")?;
 
     let furl_attr = unsafe { VarLenUnicode::from_str_unchecked("http://biom-format.org") };
-    f.new_attr_builder().with_data(&furl_attr).create("format-url")?;
+    f.new_attr_builder()
+        .with_data(&furl_attr)
+        .create("format-url")?;
 
     let gen_by_attr = unsafe { VarLenUnicode::from_str_unchecked("sparse_features 0.1.1") };
-    f.new_attr_builder().with_data(&gen_by_attr).create("generated-by")?;
+    f.new_attr_builder()
+        .with_data(&gen_by_attr)
+        .create("generated-by")?;
 
     // Any ISO8601 string is fine
     let cdate_attr = unsafe { VarLenUnicode::from_str_unchecked("1970-01-01T00:00:00") };
-    f.new_attr_builder().with_data(&cdate_attr).create("creation-date")?;
+    f.new_attr_builder()
+        .with_data(&cdate_attr)
+        .create("creation-date")?;
 
     // *** These must be int32 for best compatibility with biom ***
     let fmt_ver_i32: [i32; 2] = [2, 1];
-    f.new_attr_builder().with_data(&fmt_ver_i32).create("format-version")?;
+    f.new_attr_builder()
+        .with_data(&fmt_ver_i32)
+        .create("format-version")?;
 
     let shape_i32: [i32; 2] = [n_rows as i32, n_cols as i32];
     f.new_attr_builder().with_data(&shape_i32).create("shape")?;
@@ -346,7 +375,9 @@ struct RowCsr {
 fn main() -> anyhow::Result<()> {
     let m = Command::new("simulate-biom-from-newick")
         .version("0.1.3")
-        .about("Simulate sparse OTU/feature tables from a Newick tree and write BIOM (HDF5 CSR+CSC)")
+        .about(
+            "Simulate sparse OTU/feature tables from a Newick tree and write BIOM (HDF5 CSR+CSC)",
+        )
         .arg(
             Arg::new("tree")
                 .short('t')
@@ -494,11 +525,7 @@ fn main() -> anyhow::Result<()> {
                 if p > params.max_sparsity {
                     p = params.max_sparsity;
                 }
-                if p <= 0.0 {
-                    1e-12
-                } else {
-                    p
-                }
+                if p <= 0.0 { 1e-12 } else { p }
             })
             .collect::<Vec<f64>>()
     };
@@ -509,10 +536,7 @@ fn main() -> anyhow::Result<()> {
         p_bar,
         {
             let m = p_bar;
-            let v = sparsities
-                .iter()
-                .map(|&x| (x - m) * (x - m))
-                .sum::<f64>()
+            let v = sparsities.iter().map(|&x| (x - m) * (x - m)).sum::<f64>()
                 / (sparsities.len().max(1) as f64);
             v.sqrt()
         },
@@ -571,8 +595,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 if set.is_empty() {
                     set.insert(
-                        (alias.sample(&mut rng) as u32)
-                            .min(params.nsamp.saturating_sub(1) as u32),
+                        (alias.sample(&mut rng) as u32).min(params.nsamp.saturating_sub(1) as u32),
                     );
                 }
 
