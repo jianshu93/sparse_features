@@ -47,7 +47,8 @@ cargo build --release
 ```
 ## Generating feature tables
 ```bash
-sparse_features -t ../../data/ASVs_aligned.tre -o ./ASVs_otu.biom --samples 500000 --min-sparsity 0.00005 --mean-sparsity 0.001
+ sparse_features -t ../../data/ASVs_aligned.tre -o ./ASVs_otu.biom --samples 1000 --min-sparsity 
+0.0005 --max-count 3000 --chunk-size 1000 --mean-sparsity 0.03
 ```
 
 Ideally --min-sparsity should be >= ln(n_cols) (sample) / n_rows (taxa) to avoid empty samples. 

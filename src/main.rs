@@ -15,8 +15,7 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-// ------------------------------ Newick helpers ------------------------------
-
+//  Newick helpers
 fn sanitize_newick_drop_internal_labels_and_comments(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(bytes.len());
@@ -109,7 +108,7 @@ fn load_newick_taxa(tree_path: &str) -> anyhow::Result<Vec<String>> {
     Ok(taxa)
 }
 
-// ------------------------------ Alias sampler for weighted sampling ------------------------------
+// Alias sampler for weighted sampling
 
 struct AliasSampler {
     prob: Vec<f64>,
@@ -169,7 +168,7 @@ impl AliasSampler {
     }
 }
 
-// ------------------------------ SplitMix64 for stable per-row seeds ------------------------------
+// SplitMix64 for stable per-row seeds
 
 #[inline]
 fn splitmix64(mut x: u64) -> u64 {
@@ -180,7 +179,7 @@ fn splitmix64(mut x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-// ------------------------------ CSR -> CSC ------------------------------
+// CSR to CSC
 
 fn csr_to_csc(
     n_rows: usize,
@@ -188,7 +187,7 @@ fn csr_to_csc(
     indptr: &[i32],
     indices: &[i32],
     data: &[f64],
-) -> (Vec<i32>, Vec<i32>, Vec<f32>) {
+) -> (Vec<i32>, Vec<i32>, Vec<f64>) {
     let nnz = indices.len();
     let mut csc_indptr = vec![0i32; n_cols + 1];
     for &j in indices {
@@ -199,7 +198,7 @@ fn csr_to_csc(
     }
     let mut next = csc_indptr.clone();
     let mut csc_indices = vec![0i32; nnz];
-    let mut csc_data = vec![0f32; nnz];
+    let mut csc_data = vec![0f64; nnz];
     for r in 0..n_rows {
         let start = indptr[r] as usize;
         let end = indptr[r + 1] as usize;
@@ -207,14 +206,14 @@ fn csr_to_csc(
             let j = indices[p] as usize;
             let dst = next[j] as usize;
             csc_indices[dst] = r as i32;
-            csc_data[dst] = data[p] as f32;
+            csc_data[dst] = data[p];
             next[j] += 1;
         }
     }
     (csc_indptr, csc_indices, csc_data)
 }
 
-// ------------------------------ BIOM writer (2.1) ------------------------------
+// BIOM writer (2.1)
 
 #[inline]
 fn as_vlen_vec(strings: &[String]) -> Vec<VarLenUnicode> {
@@ -222,13 +221,6 @@ fn as_vlen_vec(strings: &[String]) -> Vec<VarLenUnicode> {
         .iter()
         .map(|s| unsafe { VarLenUnicode::from_str_unchecked(s.as_str()) })
         .collect()
-}
-
-#[inline]
-fn null_metadata_vec(n: usize) -> Vec<VarLenUnicode> {
-    // Per-ID JSON "null" strings (common when no metadata present)
-    let one = unsafe { VarLenUnicode::from_str_unchecked("null") };
-    std::iter::repeat(one).take(n).collect()
 }
 
 fn write_biom_hdf5(
@@ -239,9 +231,6 @@ fn write_biom_hdf5(
     indices_u32: &[u32],
     data: &[f64],
 ) -> H5Result<()> {
-    use hdf5::File as H5File;
-    use hdf5::types::VarLenUnicode;
-
     let n_rows = taxa_ids.len();
     let n_cols = sample_ids.len();
     let nnz = indices_u32.len();
@@ -250,13 +239,13 @@ fn write_biom_hdf5(
     let obs_indptr: Vec<i32> = indptr_u32.iter().map(|&x| x as i32).collect();
     let obs_indices: Vec<i32> = indices_u32.iter().map(|&x| x as i32).collect();
 
-    // Build CSC for sample/matrix
+    // Build CSC for sample/matrix (float64 for BIOM)
     let (samp_indptr, samp_indices, samp_data) =
         csr_to_csc(n_rows, n_cols, &obs_indptr, &obs_indices, data);
 
     let f = H5File::create(out_path)?;
 
-    // ---------- groups ----------
+    // groups
     let obs = f.create_group("observation")?;
     let _ = obs.create_group("metadata")?;
     let _ = obs.create_group("group-metadata")?;
@@ -267,21 +256,16 @@ fn write_biom_hdf5(
     let _ = samp.create_group("group-metadata")?;
     let samp_mat = samp.create_group("matrix")?;
 
-    // ---------- ids (vlen unicode) ----------
-    let as_vlen = |v: &[String]| -> Vec<VarLenUnicode> {
-        v.iter()
-            .map(|s| unsafe { VarLenUnicode::from_str_unchecked(s.as_str()) })
-            .collect()
-    };
-    let taxa_v = as_vlen(taxa_ids);
+    // ids (vlen unicode)
+    let taxa_v = as_vlen_vec(taxa_ids);
     obs.new_dataset_builder().with_data(&taxa_v).create("ids")?;
 
-    let samp_v = as_vlen(sample_ids);
+    let samp_v = as_vlen_vec(sample_ids);
     samp.new_dataset_builder()
         .with_data(&samp_v)
         .create("ids")?;
 
-    // ---------- observation/matrix (CSR) ----------
+    // observation/matrix (CSR, float64) 
     obs_mat
         .new_dataset_builder()
         .with_data(data)
@@ -295,7 +279,7 @@ fn write_biom_hdf5(
         .with_data(&obs_indptr)
         .create("indptr")?;
 
-    // ---------- sample/matrix (CSC) ----------
+    // sample/matrix (CSC, float64)
     samp_mat
         .new_dataset_builder()
         .with_data(&samp_data)
@@ -309,39 +293,61 @@ fn write_biom_hdf5(
         .with_data(&samp_indptr)
         .create("indptr")?;
 
-    // ---------- top-level required attributes ----------
-    // Strings as vlen unicode attrs
-    let id_attr = unsafe { VarLenUnicode::from_str_unchecked("No Table ID") };
-    f.new_attr_builder().with_data(&id_attr).create("id")?;
+    // top-level required attributes
 
-    let type_attr = unsafe { VarLenUnicode::from_str_unchecked("OTU table") };
-    f.new_attr_builder().with_data(&type_attr).create("type")?;
+    // id : <string or null>
+    {
+        let attr = f.new_attr::<VarLenUnicode>().create("id")?;
+        let v: VarLenUnicode = "No Table ID".parse().unwrap();
+        attr.write_scalar(&v)?;
+    }
 
-    let furl_attr = unsafe { VarLenUnicode::from_str_unchecked("http://biom-format.org") };
+    // format : <string> The name and version of the current biom format
+    {
+        let attr = f.new_attr::<VarLenUnicode>().create("format")?;
+        let v: VarLenUnicode = "Biological Observation Matrix 2.1.0".parse().unwrap();
+        attr.write_scalar(&v)?;
+    }
+
+    // format-url : <url> static URL providing format details
+    {
+        let attr = f.new_attr::<VarLenUnicode>().create("format-url")?;
+        let v: VarLenUnicode = "http://biom-format.org".parse().unwrap();
+        attr.write_scalar(&v)?;
+    }
+
+    // type : <string> Table type
+    {
+        let attr = f.new_attr::<VarLenUnicode>().create("type")?;
+        let v: VarLenUnicode = "OTU table".parse().unwrap();
+        attr.write_scalar(&v)?;
+    }
+
+    // generated-by : <string>
+    {
+        let attr = f.new_attr::<VarLenUnicode>().create("generated-by")?;
+        let v: VarLenUnicode = "sparse_features 0.1.1".parse().unwrap();
+        attr.write_scalar(&v)?;
+    }
+
+    // creation-date : <datetime> any ISO8601 is fine
+    {
+        let attr = f.new_attr::<VarLenUnicode>().create("creation-date")?;
+        let v: VarLenUnicode = "1970-01-01T00:00:00".parse().unwrap();
+        attr.write_scalar(&v)?;
+    }
+
+    // format-version : [major, minor] (as ints)
+    let fmt_ver: [i32; 2] = [2, 1];
     f.new_attr_builder()
-        .with_data(&furl_attr)
-        .create("format-url")?;
-
-    let gen_by_attr = unsafe { VarLenUnicode::from_str_unchecked("sparse_features 0.1.1") };
-    f.new_attr_builder()
-        .with_data(&gen_by_attr)
-        .create("generated-by")?;
-
-    // Any ISO8601 string is fine
-    let cdate_attr = unsafe { VarLenUnicode::from_str_unchecked("1970-01-01T00:00:00") };
-    f.new_attr_builder()
-        .with_data(&cdate_attr)
-        .create("creation-date")?;
-
-    // *** These must be int32 for best compatibility with biom ***
-    let fmt_ver_i32: [i32; 2] = [2, 1];
-    f.new_attr_builder()
-        .with_data(&fmt_ver_i32)
+        .with_data(&fmt_ver)
         .create("format-version")?;
 
+    // shape : [N, M]
     let shape_i32: [i32; 2] = [n_rows as i32, n_cols as i32];
     f.new_attr_builder().with_data(&shape_i32).create("shape")?;
 
+    // nnz : number of non-zero elements
     let nnz_i32: [i32; 1] = [nnz as i32];
     f.new_attr_builder().with_data(&nnz_i32).create("nnz")?;
 
@@ -350,7 +356,7 @@ fn write_biom_hdf5(
     Ok(())
 }
 
-// ------------------------------ Simulation core ------------------------------
+// Simulation core
 
 #[derive(Clone, Debug)]
 struct SimParams {
@@ -489,7 +495,7 @@ fn main() -> anyhow::Result<()> {
         seed: *m.get_one::<u64>("seed").unwrap(),
     };
 
-    // 1) Parse tree → taxa (leaf names)
+    // Parse tree to taxa (leaf names)
     let t0 = Instant::now();
     let taxa = load_newick_taxa(tree_path)?;
     if taxa.is_empty() {
@@ -502,12 +508,12 @@ fn main() -> anyhow::Result<()> {
         t0.elapsed().as_millis()
     );
 
-    // 2) Build sample IDs
+    // Build sample IDs
     let samples: Vec<String> = (1..=nsamp)
         .map(|i| format!("{}{}", sample_prefix, i))
         .collect();
 
-    // 3) Draw per-sample sparsities ~ Normal(mean, std), clipped to [min, max]
+    // Draw per-sample sparsities ~ Normal(mean, std), clipped to [min, max]
     let t1 = Instant::now();
     let sparsities = {
         let normal = Normal::new(params.mean_sparsity, params.std_sparsity.max(0.0))
@@ -544,16 +550,16 @@ fn main() -> anyhow::Result<()> {
         t1.elapsed().as_millis()
     );
 
-    // 4) Alias sampler across samples
+    // Alias sampler across samples
     let alias = AliasSampler::new(&sparsities);
 
-    // 5) Prepare CSR containers
+    // Prepare CSR containers
     let mut indptr: Vec<u32> = Vec::with_capacity(n_taxa + 1);
     indptr.push(0);
     let mut indices: Vec<u32> = Vec::new();
     let mut data: Vec<f64> = Vec::new();
 
-    // 6) Chunked, parallel row simulation
+    // Chunked, parallel row simulation
     let t2 = Instant::now();
     let chunk = params.chunk_size.max(1);
     let poisson = Poisson::new(sum_p.max(1e-12)).unwrap(); // expected nonzeros per row
@@ -630,7 +636,7 @@ fn main() -> anyhow::Result<()> {
         t2.elapsed().as_millis()
     );
 
-    // 7) Write BIOM (HDF5, 2.1)
+    // Write BIOM (HDF5, 2.1)
     let t3 = Instant::now();
     write_biom_hdf5(out_path, &taxa, &samples, &indptr, &indices, &data)?;
     eprintln!(
