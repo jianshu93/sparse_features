@@ -4,16 +4,21 @@
 // - Per-sample sparsity ~ Normal(mean, std) clipped to [min, max]
 // - Parallel row simulation with Rayon
 // - BIOM 2.1 writer compatible with `biom 2.1.16` CLI
+//
+// NOTE (your requested change):
+// - Only change: write top-level attribute "nnz" as u64 (instead of i32).
+// - Everything else (CSR indptr/indices types, matrix data f64, CSR->CSC, shape/format-version) stays unchanged.
 
 use clap::{Arg, Command};
-use hdf5::{File as H5File, Result as H5Result, types::VarLenUnicode};
-use newick::{Newick, NewickTree, one_from_string};
+use hdf5::{types::VarLenUnicode, File as H5File, Result as H5Result};
+use newick::{one_from_string, NewickTree};
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
 use rand_distr::{Distribution, Normal, Poisson, Uniform};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
+use newick::Newick;
 
 //  Newick helpers
 fn sanitize_newick_drop_internal_labels_and_comments(s: &str) -> String {
@@ -109,7 +114,6 @@ fn load_newick_taxa(tree_path: &str) -> anyhow::Result<Vec<String>> {
 }
 
 // Alias sampler for weighted sampling
-
 struct AliasSampler {
     prob: Vec<f64>,
     alias: Vec<usize>,
@@ -164,12 +168,15 @@ impl AliasSampler {
         }
         let i = rng.gen_range(0..n);
         let u: f64 = uni.sample(rng);
-        if u < self.prob[i] { i } else { self.alias[i] }
+        if u < self.prob[i] {
+            i
+        } else {
+            self.alias[i]
+        }
     }
 }
 
 // SplitMix64 for stable per-row seeds
-
 #[inline]
 fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E3779B97F4A7C15);
@@ -180,7 +187,6 @@ fn splitmix64(mut x: u64) -> u64 {
 }
 
 // CSR to CSC
-
 fn csr_to_csc(
     n_rows: usize,
     n_cols: usize,
@@ -214,7 +220,6 @@ fn csr_to_csc(
 }
 
 // BIOM writer (2.1)
-
 #[inline]
 fn as_vlen_vec(strings: &[String]) -> Vec<VarLenUnicode> {
     strings
@@ -261,15 +266,10 @@ fn write_biom_hdf5(
     obs.new_dataset_builder().with_data(&taxa_v).create("ids")?;
 
     let samp_v = as_vlen_vec(sample_ids);
-    samp.new_dataset_builder()
-        .with_data(&samp_v)
-        .create("ids")?;
+    samp.new_dataset_builder().with_data(&samp_v).create("ids")?;
 
-    // observation/matrix (CSR, float64) 
-    obs_mat
-        .new_dataset_builder()
-        .with_data(data)
-        .create("data")?;
+    // observation/matrix (CSR, float64)
+    obs_mat.new_dataset_builder().with_data(data).create("data")?;
     obs_mat
         .new_dataset_builder()
         .with_data(&obs_indices)
@@ -348,8 +348,9 @@ fn write_biom_hdf5(
     f.new_attr_builder().with_data(&shape_i32).create("shape")?;
 
     // nnz : number of non-zero elements
-    let nnz_i32: [i32; 1] = [nnz as i32];
-    f.new_attr_builder().with_data(&nnz_i32).create("nnz")?;
+    // now: u64 
+    let nnz_u64: [u64; 1] = [nnz as u64];
+    f.new_attr_builder().with_data(&nnz_u64).create("nnz")?;
 
     // Make sure everything hits disk
     f.flush()?;
@@ -357,7 +358,6 @@ fn write_biom_hdf5(
 }
 
 // Simulation core
-
 #[derive(Clone, Debug)]
 struct SimParams {
     nsamp: usize,
@@ -381,9 +381,7 @@ struct RowCsr {
 fn main() -> anyhow::Result<()> {
     let m = Command::new("simulate-biom-from-newick")
         .version("0.1.3")
-        .about(
-            "Simulate sparse OTU/feature tables from a Newick tree and write BIOM (HDF5 CSR+CSC)",
-        )
+        .about("Simulate sparse OTU/feature tables from a Newick tree and write BIOM (HDF5 CSR+CSC)")
         .arg(
             Arg::new("tree")
                 .short('t')
@@ -531,7 +529,11 @@ fn main() -> anyhow::Result<()> {
                 if p > params.max_sparsity {
                     p = params.max_sparsity;
                 }
-                if p <= 0.0 { 1e-12 } else { p }
+                if p <= 0.0 {
+                    1e-12
+                } else {
+                    p
+                }
             })
             .collect::<Vec<f64>>()
     };
@@ -542,7 +544,10 @@ fn main() -> anyhow::Result<()> {
         p_bar,
         {
             let m = p_bar;
-            let v = sparsities.iter().map(|&x| (x - m) * (x - m)).sum::<f64>()
+            let v = sparsities
+                .iter()
+                .map(|&x| (x - m) * (x - m))
+                .sum::<f64>()
                 / (sparsities.len().max(1) as f64);
             v.sqrt()
         },
