@@ -4,9 +4,7 @@
 // - Per-sample sparsity ~ Normal(mean, std) clipped to [min, max]
 // - Parallel row simulation with Rayon
 // - BIOM 2.1 writer compatible with `biom 2.1.16` CLI
-//
-// NOTE (your requested change):
-// - Only change: write top-level attribute "nnz" as u64 (instead of i32).
+// attribute "nnz" as u64 (instead of i32).
 // - Everything else (CSR indptr/indices types, matrix data f64, CSR->CSC, shape/format-version) stays unchanged.
 
 use clap::{Arg, Command};
