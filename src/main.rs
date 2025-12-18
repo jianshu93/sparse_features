@@ -1,22 +1,27 @@
-// Simulate sparse OTU/feature tables from a Newick tree into BIOM (HDF5, CSR+CSC).
+// Simulate sparse OTU/feature tables from a Newick tree into BIOM-like HDF5 (CSR+CSC).
 // - Clap 4.3 CLI
 // - Newick parsing & sanitization
 // - Per-sample sparsity ~ Normal(mean, std) clipped to [min, max]
 // - Parallel row simulation with Rayon
-// - BIOM 2.1 writer compatible with `biom 2.1.16` CLI
-// attribute "nnz" as u64 (instead of i32).
-// - Everything else (CSR indptr/indices types, matrix data f64, CSR->CSC, shape/format-version) stays unchanged.
+
+// - CSR indptr is now u64 (so nnz can exceed 2^32)
+// - CSR->CSC conversion uses u64 indptr (no i32 casts that create negative offsets)
+// - Top-level attribute "nnz" is written as u64
+//
+//  indices are u32, data is f64, simulation logic unchanged.
+// NOTE: This breaks strict BIOM 2.1 dtype expectations (BIOM expects int32 indptr/indices),
+// but you explicitly said that's OK for your HDF5-compatible workflow.
 
 use clap::{Arg, Command};
 use hdf5::{types::VarLenUnicode, File as H5File, Result as H5Result};
 use newick::{one_from_string, NewickTree};
+use newick::Newick;
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
 use rand_distr::{Distribution, Normal, Poisson, Uniform};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
-use newick::Newick;
 
 //  Newick helpers
 fn sanitize_newick_drop_internal_labels_and_comments(s: &str) -> String {
@@ -184,40 +189,76 @@ fn splitmix64(mut x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-// CSR to CSC
-fn csr_to_csc(
+// CSR to CSC (u64 indptr, u32 indices, f64 data)
+fn csr_to_csc_u64(
     n_rows: usize,
     n_cols: usize,
-    indptr: &[i32],
-    indices: &[i32],
+    indptr: &[u64],
+    indices: &[u32],
     data: &[f64],
-) -> (Vec<i32>, Vec<i32>, Vec<f64>) {
-    let nnz = indices.len();
-    let mut csc_indptr = vec![0i32; n_cols + 1];
+) -> (Vec<u64>, Vec<u32>, Vec<f64>) {
+    assert_eq!(indptr.len(), n_rows + 1, "indptr must be length n_rows+1");
+    assert_eq!(indices.len(), data.len(), "indices and data must have same length");
+
+    let nnz_usize = indices.len();
+    let nnz_u64 = nnz_usize as u64;
+    assert_eq!(
+        *indptr.last().unwrap_or(&0),
+        nnz_u64,
+        "indptr last must equal nnz"
+    );
+    assert!(
+        nnz_u64 <= usize::MAX as u64,
+        "nnz exceeds usize::MAX on this platform"
+    );
+
+    // Count entries per column
+    let mut csc_indptr = vec![0u64; n_cols + 1];
     for &j in indices {
-        csc_indptr[(j as usize) + 1] += 1;
+        let ju = j as usize;
+        assert!(ju < n_cols, "column index {} out of range n_cols={}", ju, n_cols);
+        csc_indptr[ju + 1] += 1;
     }
+
+    // Prefix sum -> offsets
     for c in 0..n_cols {
         csc_indptr[c + 1] += csc_indptr[c];
     }
+
     let mut next = csc_indptr.clone();
-    let mut csc_indices = vec![0i32; nnz];
-    let mut csc_data = vec![0f64; nnz];
+    let mut csc_indices = vec![0u32; nnz_usize];
+    let mut csc_data = vec![0f64; nnz_usize];
+
     for r in 0..n_rows {
-        let start = indptr[r] as usize;
-        let end = indptr[r + 1] as usize;
+        assert!(
+            r <= u32::MAX as usize,
+            "row index {} exceeds u32::MAX (cannot store in csc_indices u32)",
+            r
+        );
+        let start_u64 = indptr[r];
+        let end_u64 = indptr[r + 1];
+        assert!(start_u64 <= end_u64, "indptr not nondecreasing at row {}", r);
+        assert!(end_u64 <= nnz_u64, "indptr end beyond nnz at row {}", r);
+
+        let start = start_u64 as usize;
+        let end = end_u64 as usize;
+
         for p in start..end {
             let j = indices[p] as usize;
-            let dst = next[j] as usize;
-            csc_indices[dst] = r as i32;
+            let dst_u64 = next[j];
+            assert!(dst_u64 < nnz_u64, "dst beyond nnz (dst={}, nnz={})", dst_u64, nnz_u64);
+            let dst = dst_u64 as usize;
+
+            csc_indices[dst] = r as u32;
             csc_data[dst] = data[p];
             next[j] += 1;
         }
     }
+
     (csc_indptr, csc_indices, csc_data)
 }
 
-// BIOM writer (2.1)
+// BIOM-like HDF5 writer (CSR+CSC)
 #[inline]
 fn as_vlen_vec(strings: &[String]) -> Vec<VarLenUnicode> {
     strings
@@ -230,21 +271,17 @@ fn write_biom_hdf5(
     out_path: &str,
     taxa_ids: &[String],
     sample_ids: &[String],
-    indptr_u32: &[u32], // CSR (observation-oriented)
+    indptr_u64: &[u64], // CSR indptr u64 now
     indices_u32: &[u32],
     data: &[f64],
 ) -> H5Result<()> {
     let n_rows = taxa_ids.len();
     let n_cols = sample_ids.len();
-    let nnz = indices_u32.len();
+    let nnz_u64: u64 = indices_u32.len() as u64;
 
-    // Cast to BIOM-required dtypes
-    let obs_indptr: Vec<i32> = indptr_u32.iter().map(|&x| x as i32).collect();
-    let obs_indices: Vec<i32> = indices_u32.iter().map(|&x| x as i32).collect();
-
-    // Build CSC for sample/matrix (float64 for BIOM)
+    // Build CSC for sample/matrix
     let (samp_indptr, samp_indices, samp_data) =
-        csr_to_csc(n_rows, n_cols, &obs_indptr, &obs_indices, data);
+        csr_to_csc_u64(n_rows, n_cols, indptr_u64, indices_u32, data);
 
     let f = H5File::create(out_path)?;
 
@@ -270,11 +307,11 @@ fn write_biom_hdf5(
     obs_mat.new_dataset_builder().with_data(data).create("data")?;
     obs_mat
         .new_dataset_builder()
-        .with_data(&obs_indices)
+        .with_data(indices_u32)
         .create("indices")?;
     obs_mat
         .new_dataset_builder()
-        .with_data(&obs_indptr)
+        .with_data(indptr_u64)
         .create("indptr")?;
 
     // sample/matrix (CSC, float64)
@@ -300,21 +337,21 @@ fn write_biom_hdf5(
         attr.write_scalar(&v)?;
     }
 
-    // format : <string> The name and version of the current biom format
+    // format : <string>
     {
         let attr = f.new_attr::<VarLenUnicode>().create("format")?;
         let v: VarLenUnicode = "Biological Observation Matrix 2.1.0".parse().unwrap();
         attr.write_scalar(&v)?;
     }
 
-    // format-url : <url> static URL providing format details
+    // format-url : <url>
     {
         let attr = f.new_attr::<VarLenUnicode>().create("format-url")?;
         let v: VarLenUnicode = "http://biom-format.org".parse().unwrap();
         attr.write_scalar(&v)?;
     }
 
-    // type : <string> Table type
+    // type : <string>
     {
         let attr = f.new_attr::<VarLenUnicode>().create("type")?;
         let v: VarLenUnicode = "OTU table".parse().unwrap();
@@ -328,14 +365,14 @@ fn write_biom_hdf5(
         attr.write_scalar(&v)?;
     }
 
-    // creation-date : <datetime> any ISO8601 is fine
+    // creation-date : <datetime>
     {
         let attr = f.new_attr::<VarLenUnicode>().create("creation-date")?;
         let v: VarLenUnicode = "1970-01-01T00:00:00".parse().unwrap();
         attr.write_scalar(&v)?;
     }
 
-    // format-version : [major, minor] (as ints)
+    // format-version : [major, minor]
     let fmt_ver: [i32; 2] = [2, 1];
     f.new_attr_builder()
         .with_data(&fmt_ver)
@@ -345,12 +382,10 @@ fn write_biom_hdf5(
     let shape_i32: [i32; 2] = [n_rows as i32, n_cols as i32];
     f.new_attr_builder().with_data(&shape_i32).create("shape")?;
 
-    // nnz : number of non-zero elements
-    // now: u64 
-    let nnz_u64: [u64; 1] = [nnz as u64];
-    f.new_attr_builder().with_data(&nnz_u64).create("nnz")?;
+    // nnz : number of non-zero elements (u64 as requested)
+    let nnz_attr: [u64; 1] = [nnz_u64];
+    f.new_attr_builder().with_data(&nnz_attr).create("nnz")?;
 
-    // Make sure everything hits disk
     f.flush()?;
     Ok(())
 }
@@ -379,7 +414,7 @@ struct RowCsr {
 fn main() -> anyhow::Result<()> {
     let m = Command::new("simulate-biom-from-newick")
         .version("0.1.3")
-        .about("Simulate sparse OTU/feature tables from a Newick tree and write BIOM (HDF5 CSR+CSC)")
+        .about("Simulate sparse OTU/feature tables from a Newick tree and write BIOM-like HDF5 (CSR+CSC)")
         .arg(
             Arg::new("tree")
                 .short('t')
@@ -463,7 +498,7 @@ fn main() -> anyhow::Result<()> {
                 .short('o')
                 .long("output")
                 .default_value("simulated.biom")
-                .help("Output BIOM (HDF5) path"),
+                .help("Output HDF5 path"),
         )
         .arg(
             Arg::new("sample_prefix")
@@ -527,11 +562,7 @@ fn main() -> anyhow::Result<()> {
                 if p > params.max_sparsity {
                     p = params.max_sparsity;
                 }
-                if p <= 0.0 {
-                    1e-12
-                } else {
-                    p
-                }
+                if p <= 0.0 { 1e-12 } else { p }
             })
             .collect::<Vec<f64>>()
     };
@@ -557,8 +588,8 @@ fn main() -> anyhow::Result<()> {
     let alias = AliasSampler::new(&sparsities);
 
     // Prepare CSR containers
-    let mut indptr: Vec<u32> = Vec::with_capacity(n_taxa + 1);
-    indptr.push(0);
+    let mut indptr: Vec<u64> = Vec::with_capacity(n_taxa + 1);
+    indptr.push(0u64);
     let mut indices: Vec<u32> = Vec::new();
     let mut data: Vec<f64> = Vec::new();
 
@@ -628,7 +659,7 @@ fn main() -> anyhow::Result<()> {
             indices.extend_from_slice(&row.indices);
             data.extend_from_slice(&row.data);
             let last = *indptr.last().unwrap();
-            indptr.push(last + (row.indices.len() as u32));
+            indptr.push(last + (row.indices.len() as u64));
         }
 
         start = end;
@@ -639,11 +670,11 @@ fn main() -> anyhow::Result<()> {
         t2.elapsed().as_millis()
     );
 
-    // Write BIOM (HDF5, 2.1)
+    // Write HDF5 (CSR+CSC)
     let t3 = Instant::now();
     write_biom_hdf5(out_path, &taxa, &samples, &indptr, &indices, &data)?;
     eprintln!(
-        "Wrote BIOM to '{}' (rows={}, cols={}, nnz={}) in {} ms",
+        "Wrote HDF5 to '{}' (rows={}, cols={}, nnz={}) in {} ms",
         out_path,
         taxa.len(),
         samples.len(),
